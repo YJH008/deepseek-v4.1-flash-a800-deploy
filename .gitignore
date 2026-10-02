@@ -1,0 +1,8 @@
+# 权重、日志、缓存等不提交
+*.safetensors
+serve.log
+*.log
+/dev/shm
+__pycache__/
+*.pyc
+.venv/
