@@ -204,14 +204,7 @@ dmesg | grep -i nvrm | tail   # 出现 NV_ERR_GPU_IN_FULLCHIP_RESET / nvlink sta
 
 > `CUDA_VISIBLE_DEVICES` 只是软件隔离，卡本身仍是坏的。若 `nvidia-smi` 持续报 FULLCHIP_RESET / NVLink 错误，建议**联系硬件运维更换故障卡**。
 
-## 七、已知限制（来自上游）
-
-- **非真正 token 级流式**：`eng.generate_text()` 一次性生成完整回答后才返回，SSE 是"伪流式"（先算完再分块吐出）。接入 Cherry Studio 等聊天客户端时，建议**关闭客户端的流式输出开关**，否则长回答生成期间客户端会一直"等待"。
-- 无连续批处理（仅槽位级并发）。
-- 无视觉输入（尽管仓库含 vision 代码，README 仍标注限制）。
-- 长上下文（1M）需 4 卡流水线并行 + 特定环境变量。
-
-## 八、常用管理命令
+## 七、常用管理命令
 
 ```bash
 # 看日志
@@ -224,7 +217,7 @@ tmux kill-server
 tmux new-session -d -s dsv41 <repo>/start_tmux.sh
 ```
 
-## 九、文件说明
+## 八、文件说明
 
 | 文件 | 说明 |
 |---|---|
@@ -233,6 +226,7 @@ tmux new-session -d -s dsv41 <repo>/start_tmux.sh
 | `run_4xa800.sh` | 4 卡启动脚本（含 `CUDA_VISIBLE_DEVICES` 故障卡隔离） |
 | `start_tmux.sh` | tmux 托管启动包装（决定切 4 卡或 8 卡的入口） |
 | `patches/README.md` | 8 卡适配补丁说明 |
+| `patches/fix-sse-close.md` | SSE 流式连接不关闭的修复说明 |
 
 ## 免责声明
 
