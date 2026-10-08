@@ -137,6 +137,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | SSH 后台进程被杀 | paramiko/SSH 会话关闭后服务停止 | 用 tmux 托管（弃用 systemd，因 restart 反复打断权重加载） |
 | GPU 故障干扰 torch 初始化 | torch 在 `import` 时枚举全部卡做 capability 检查，故障卡导致 CUDA 上下文崩溃（`device=N, num_gpus=<乱码>`） | `CUDA_VISIBLE_DEVICES` 隔离故障卡，详见下文 |
 | tmux 会话没起来 | `tmux kill-session` 只杀会话，tmux server 残留导致新会话失效 | 用 `tmux kill-server` 彻底清理 |
+| SSE 流式不关闭连接 | `[DONE]` 后 curl 不自动断开、Cherry Studio 卡等待 | 详见 [patches/fix-sse-close.md](./patches/fix-sse-close.md) |
 
 ## 六、4 卡 / 8 卡切换
 
