@@ -1,6 +1,6 @@
-# DeepSeek-V4.1-Flash 在 8×A800 上的部署方案
+# DeepSeek-V4.1-Flash 在 A800 上的部署方案（8 卡 / 4 卡）
 
-> 基于 [shi3z/deepseekv4.1-A100-custom](https://github.com/shi3z/deepseekv4.1-A100-custom) 的自定义推理运行时，在 **8 × NVIDIA A800-SXM4-80GB** 上完成 DeepSeek-V4.1-Flash 的实盘部署与适配。
+> 基于 [shi3z/deepseekv4.1-A100-custom](https://github.com/shi3z/deepseekv4.1-A100-custom) 的自定义推理运行时，在 **NVIDIA A800-SXM4-80GB** 上完成 DeepSeek-V4.1-Flash 的实盘部署与适配。支持 **8 卡**与 **4 卡**两种模式，提供一键切换方法。
 
 ## 一、部署结果
 
@@ -79,14 +79,13 @@ cd deepseekv4.1-A100-custom
 
 ### 4. 启动服务
 
-用本仓库的 [run_8xa800.sh](./run_8xa800.sh)（已按 8 卡 + 单流高质量适配）：
+根据卡数选择对应脚本（详见下文 [六、4 卡 / 8 卡切换](#六4-卡--8-卡切换)）。
+
+**8 卡模式**（[run_8xa800.sh](./run_8xa800.sh)）：
 
 ```bash
-# 直接前台运行
 bash run_8xa800.sh
-
-# 或后台托管（推荐，脱离 SSH 会话）
-tmux new-session -d -s dsv41 ./start_tmux.sh
+# 或后台托管：tmux new-session -d -s dsv41 ./start_tmux.sh
 ```
 
 核心参数（8 卡 EP 分配）：
@@ -95,6 +94,23 @@ tmux new-session -d -s dsv41 ./start_tmux.sh
 --devices 0,1,2,3,4,5,6,7
 --ep --ep-shards 48,48,48,48,48,48,48,48   # 384 experts ÷ 8
 DSV41_LAYER_COUNTS=5,5,5,5,5,5,5,5          # 40 层 ÷ 8
+--max-seq-len 1048576 --max-seqs 3 --mtp 0
+```
+
+**4 卡模式**（[run_4xa800.sh](./run_4xa800.sh)）：
+
+```bash
+bash run_4xa800.sh
+# 或后台托管：tmux new-session -d -s dsv41 ./start_tmux.sh
+```
+
+核心参数（4 卡 EP 分配，含故障卡隔离）：
+
+```
+export CUDA_VISIBLE_DEVICES=0,1,2,3        # 隔离故障卡，torch 只看到 4 卡
+--devices 0,1,2,3
+--ep --ep-shards 96,96,96,96               # 384 experts ÷ 4
+DSV41_LAYER_COUNTS=10,10,10,10             # 40 层 ÷ 4
 --max-seq-len 1048576 --max-seqs 3 --mtp 0
 ```
 
@@ -119,34 +135,102 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | CUDA 编译路径 | 硬编码 cuda-12.8 | `DSV41_NVCC` 环境变量覆盖 |
 | Pillow 缺失 | `No module named 'PIL'` | `pip install Pillow` |
 | SSH 后台进程被杀 | paramiko/SSH 会话关闭后服务停止 | 用 tmux 托管（弃用 systemd，因 restart 反复打断权重加载） |
+| GPU 故障干扰 torch 初始化 | torch 在 `import` 时枚举全部卡做 capability 检查，故障卡导致 CUDA 上下文崩溃（`device=N, num_gpus=<乱码>`） | `CUDA_VISIBLE_DEVICES` 隔离故障卡，详见下文 |
+| tmux 会话没起来 | `tmux kill-session` 只杀会话，tmux server 残留导致新会话失效 | 用 `tmux kill-server` 彻底清理 |
 
-## 六、已知限制（来自上游）
+## 六、4 卡 / 8 卡切换
+
+### 6.1 两种模式对比
+
+| 维度 | 8 卡 | 4 卡 |
+|---|---|---|
+| 每卡层数 | 5 层 | 10 层 |
+| 每卡 experts | 48 | 96 |
+| 单卡显存占用 | ~37-38 GiB | ~72-75 GiB |
+| 显存余量 | 充足 | 较紧（约占 90%） |
+| 适用场景 | 默认均衡生产、大神存余量 | 单流高质量、**GPU 故障降级** |
+
+### 6.2 切换方法
+
+切换本质是改 `start_tmux.sh` 里调用的脚本（`run_8xa800.sh` ↔ `run_4xa800.sh`），然后重启服务。
+
+**方法一：改 start_tmux.sh（推荐）**
+
+编辑 `start_tmux.sh`，把最后一行改为目标脚本：
+
+```bash
+# 切 4 卡
+bash run_4xa800.sh 2>&1 | tee -a serve.log
+
+# 切 8 卡
+bash run_8xa800.sh 2>&1 | tee -a serve.log
+```
+
+然后重启：
+
+```bash
+tmux kill-server          # 彻底清理（注意不是 kill-session）
+sleep 2
+tmux new-session -d -s dsv41 <repo>/start_tmux.sh
+```
+
+**方法二：直接指定脚本前台运行**
+
+```bash
+cd <repo>
+bash run_4xa800.sh   # 或 run_8xa800.sh
+```
+
+### 6.3 GPU 故障降级（重要）
+
+当某张 GPU 故障（如 GPU6 掉卡）时，即使只传 `--devices 0,1,2,3`，torch 仍会在 `import` 阶段枚举**全部物理卡**做 capability 检查，导致整个 CUDA 上下文崩溃。
+
+**解决**：使用 `CUDA_VISIBLE_DEVICES` 隔离，让 torch 根本看不到故障卡：
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3   # 只暴露健康的 4 张卡
+```
+
+> `run_4xa800.sh` 已内置该隔离。注意 `CUDA_VISIBLE_DEVICES` 会把可见卡重新编号为 0,1,2,3，后续 `--devices 0,1,2,3` 参数无需改动。
+
+**故障卡如何判断**：
+
+```bash
+nvidia-smi --query-gpu=index,name,utilization.gpu --format=csv,noheader
+# 故障卡 utilization 显示 [N/A]，且 nvidia-smi -i <id> -q 直接超时
+dmesg | grep -i nvrm | tail   # 出现 NV_ERR_GPU_IN_FULLCHIP_RESET / nvlink status 失败
+```
+
+> `CUDA_VISIBLE_DEVICES` 只是软件隔离，卡本身仍是坏的。若 `nvidia-smi` 持续报 FULLCHIP_RESET / NVLink 错误，建议**联系硬件运维更换故障卡**。
+
+## 七、已知限制（来自上游）
 
 - **非真正 token 级流式**：`eng.generate_text()` 一次性生成完整回答后才返回，SSE 是"伪流式"（先算完再分块吐出）。接入 Cherry Studio 等聊天客户端时，建议**关闭客户端的流式输出开关**，否则长回答生成期间客户端会一直"等待"。
 - 无连续批处理（仅槽位级并发）。
 - 无视觉输入（尽管仓库含 vision 代码，README 仍标注限制）。
 - 长上下文（1M）需 4 卡流水线并行 + 特定环境变量。
 
-## 七、常用管理命令
+## 八、常用管理命令
 
 ```bash
 # 看日志
 tail -f <repo>/serve.log
 
-# 停服务
-tmux kill-session -t dsv41
+# 停服务（kill-server 彻底清理 tmux server，避免残留）
+tmux kill-server
 
-# 重新拉起（服务器重启后）
+# 重新拉起（服务器重启后 / 切换卡数后）
 tmux new-session -d -s dsv41 <repo>/start_tmux.sh
 ```
 
-## 八、文件说明
+## 九、文件说明
 
 | 文件 | 说明 |
 |---|---|
 | `README.md` | 本文档 |
 | `run_8xa800.sh` | 8 卡单流高质量启动脚本 |
-| `start_tmux.sh` | tmux 托管启动包装 |
+| `run_4xa800.sh` | 4 卡启动脚本（含 `CUDA_VISIBLE_DEVICES` 故障卡隔离） |
+| `start_tmux.sh` | tmux 托管启动包装（决定切 4 卡或 8 卡的入口） |
 | `patches/README.md` | 8 卡适配补丁说明 |
 
 ## 免责声明
